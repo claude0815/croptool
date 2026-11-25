@@ -1,0 +1,22 @@
+#!/bin/sh
+# Startskript: ruft croptool.py mit der lokalen venv (.venv) auf.
+# Funktioniert auch als Symlink (z. B. ~/.local/bin/croptool) und aus Kurzbefehlen,
+# wo PATH stark eingeschränkt ist.
+
+self=$0
+while [ -L "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+dir=$(cd "$(dirname "$self")" && pwd -P)
+
+if [ -x "$dir/.venv/bin/python3" ]; then
+    py="$dir/.venv/bin/python3"
+else
+    py=python3
+fi
+
+exec "$py" "$dir/croptool.py" "$@"
