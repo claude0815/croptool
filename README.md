@@ -87,6 +87,16 @@ Beispiele:
 
 `croptool.py` läuft auch direkt mit jedem Python 3.8+, in dem Pillow installiert ist (macOS, Linux, Windows).
 
+## Fehlerbehebung
+
+**„Keine Bilder übergeben“** (in älteren Versionen: `the following arguments are required: BILD`): Das Skript hat keinen einzigen Dateipfad bekommen. Folgendes prüfen:
+
+- Den Kurzbefehl aus dem Finder starten (Bilder markieren, dann Rechtsklick › Schnellaktionen) und nicht über ▶︎ in der Kurzbefehle-App, denn dort gibt es keine Eingabe. Alternativ im Eingabe-Block oben die Option „Wenn keine Eingabe vorhanden ist“ (*If there's no input*) auf „Dateien abfragen“ (*Ask For Files*) stellen. Dann öffnet sich in diesem Fall eine Dateiauswahl.
+- In „Shell-Skript ausführen“ muss **Eingabe** auf „Kurzbefehleingabe“ stehen. Ist das Feld leer, kommt nichts an.
+- **Eingabe übergeben** muss auf „als Argumente“ stehen. Bei „an stdin“ übergibt Kurzbefehle je nach Version die Bilddaten statt der Pfade. croptool erkennt das und meldet es.
+
+**Dateinamen mit Leerzeichen im Terminal:** Den Namen in Anführungszeichen setzen (`croptool "Mein Foto.jpg"`) oder die Datei ins Terminal ziehen. croptool setzt aber auch ungequotete Namen wieder zusammen (`croptool Mein Foto.jpg` funktioniert). Auf englischsprachigen Macs enthalten Bildschirmfoto-Namen vor „AM/PM“ ein unsichtbares Sonder-Leerzeichen (U+202F). Beim Abtippen trifft man die Datei deshalb nie genau. croptool behandelt solche Leerzeichen wie normale.
+
 ## Details
 
 - Die EXIF-Ausrichtung wird beachtet, damit Hochkant-Fotos vom Smartphone richtig herum erscheinen.

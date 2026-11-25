@@ -2,6 +2,7 @@ import io
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -182,6 +183,88 @@ class ProcessTest(unittest.TestCase):
         res = subprocess.run([str(ROOT / "croptool"), str(src)],
                              capture_output=True, text=True, check=True)
         self.assertEqual(res.stdout.strip(), str(self.tmp / "cli_1244x700.png"))
+
+
+class InputHandlingTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name) / "Ordner mit Leerzeichen"
+        self.tmp.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def make(self, name):
+        path = self.tmp / name
+        Image.new("RGB", (300, 600), "red").save(path)
+        return path
+
+    def run_cli(self, *args, stdin=b""):
+        return subprocess.run([str(ROOT / "croptool"), *map(str, args)], input=stdin,
+                              capture_output=True, cwd=self.tmp)
+
+    def test_quoted_name_with_spaces(self):
+        self.make("Mein Foto.jpg")
+        res = self.run_cli("Mein Foto.jpg")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / "Mein Foto_1244x700.png").exists())
+
+    def test_unquoted_name_with_spaces_is_rejoined(self):
+        self.make("Mein schönes Foto.jpg")
+        self.make("b.png")
+        # wie: croptool Mein schönes Foto.jpg b.png  (ohne Anführungszeichen)
+        res = self.run_cli("Mein", "schönes", "Foto.jpg", "b.png")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / "Mein schönes Foto_1244x700.png").exists())
+        self.assertTrue((self.tmp / "b_1244x700.png").exists())
+
+    def test_macos_screenshot_narrow_space(self):
+        real = "Screenshot 2026-11-25 at 10.15.30 AM.png"
+        self.make(real)
+        res = self.run_cli("Screenshot 2026-11-25 at 10.15.30 AM.png")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / real.replace(".png", "_1244x700.png")).exists())
+
+    def test_decomposed_umlauts(self):
+        nfd = unicodedata.normalize("NFD", "Bärchen.jpg")
+        self.make(nfd)
+        res = self.run_cli(unicodedata.normalize("NFC", "Bärchen.jpg"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_missing_file_shows_quote_hint(self):
+        res = self.run_cli("gibt", "es", "nicht.jpg")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("Anführungszeichen", res.stderr.decode())
+
+    def test_no_input_gives_german_hint(self):
+        res = self.run_cli()
+        self.assertEqual(res.returncode, 2)
+        err = res.stderr.decode()
+        self.assertIn("Keine Bilder übergeben", err)
+        self.assertIn("als Argumente", err)
+        self.assertNotIn("required", err)
+
+    def test_paths_via_stdin(self):
+        self.make("über stdin.jpg")
+        self.make("url name.png")
+        url = "file://" + str(self.tmp / "url name.png").replace(" ", "%20")
+        res = self.run_cli(stdin=f"{self.tmp / 'über stdin.jpg'}\n{url}\n".encode())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / "über stdin_1244x700.png").exists())
+        self.assertTrue((self.tmp / "url name_1244x700.png").exists())
+
+    def test_image_bytes_via_stdin_gives_hint(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10)).save(buf, "JPEG")
+        res = self.run_cli(stdin=buf.getvalue())
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("als Argumente", res.stderr.decode())
+
+    def test_output_option_with_unquoted_input(self):
+        self.make("Mein Foto.jpg")
+        res = self.run_cli("-o", "ziel.png", "Mein", "Foto.jpg")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue((self.tmp / "ziel.png").exists())
 
 
 if __name__ == "__main__":

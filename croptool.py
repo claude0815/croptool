@@ -23,12 +23,26 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULT_WIDTH = 1244
 DEFAULT_HEIGHT = 700
+
+NO_INPUT_MESSAGE = (
+    "Keine Bilder übergeben. Bilder im Finder markieren und per Rechtsklick › "
+    "Schnellaktionen starten (nicht über ▶︎ in der Kurzbefehle-App). Im Kurzbefehl "
+    "bei „Shell-Skript ausführen“: Eingabe = „Kurzbefehleingabe“, "
+    "Eingabe übergeben = „als Argumente“."
+)
+STDIN_IMAGE_MESSAGE = (
+    "Der Kurzbefehl übergibt Bilddaten statt Dateipfaden. Bei „Shell-Skript "
+    "ausführen“ bitte „Eingabe übergeben: als Argumente“ einstellen."
+)
+_IMAGE_MAGIC = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"GIF8", b"II*\x00", b"MM\x00*")
 
 try:
     from PIL import Image, ImageOps
@@ -160,6 +174,89 @@ def output_path(src: Path, width: int, height: int, suffix: str | None,
     return directory / f"{src.stem}{suffix}.png"
 
 
+# Leerzeichen-Varianten, die in Dateinamen vorkommen (macOS-Bildschirmfotos auf
+# Englisch nutzen z. B. U+202F vor „AM“/„PM“), werden wie normale Leerzeichen behandelt.
+_SPACE_LIKE = dict.fromkeys(map(ord, "     "), " ")
+_MAX_JOIN = 16
+
+QUOTE_HINT = ("Tipp: Dateinamen mit Leerzeichen in Anführungszeichen setzen, "
+              "z. B. croptool \"Mein Foto.jpg\" – oder die Datei ins Terminal ziehen.")
+
+
+def _norm_name(name: str) -> str:
+    return unicodedata.normalize("NFC", name).translate(_SPACE_LIKE)
+
+
+def find_file(path: Path) -> Path | None:
+    """Datei finden – tolerant gegenüber Sonder-Leerzeichen und Unicode-Schreibweisen."""
+    path = path.expanduser()
+    if path.is_file():
+        return path
+    parent = path.parent
+    if not path.name or not parent.is_dir():
+        return None
+    wanted = _norm_name(path.name)
+    try:
+        matches = [c for c in parent.iterdir()
+                   if _norm_name(c.name) == wanted and c.is_file()]
+    except OSError:
+        return None
+    return matches[0] if len(matches) == 1 else None
+
+
+def resolve_inputs(raw: list[Path]) -> list[Path]:
+    """Eingaben auf vorhandene Dateien abbilden.
+
+    Wurde ein Name mit Leerzeichen ohne Anführungszeichen übergeben, hat die Shell
+    ihn in mehrere Argumente zerlegt (``Mein`` + ``Foto.jpg``). Solche Teile werden
+    wieder zusammengesetzt, sofern es die Datei dann gibt.
+    """
+    result: list[Path] = []
+    i = 0
+    while i < len(raw):
+        found = find_file(raw[i])
+        end = i
+        if found is None:
+            for j in range(i + 1, min(len(raw), i + _MAX_JOIN)):
+                found = find_file(Path(" ".join(str(p) for p in raw[i:j + 1])))
+                if found is not None:
+                    end = j
+                    break
+        result.append(found if found is not None else raw[i].expanduser())
+        i = end + 1
+    return result
+
+
+def inputs_from_stdin(stream) -> list[Path]:
+    """Dateipfade (oder file://-URLs) zeilenweise aus einem Byte-Stream lesen."""
+    if stream is None:
+        return []
+    data = stream.read()
+    if not data:
+        return []
+    if data.startswith(_IMAGE_MAGIC) or data[4:8] == b"ftyp":  # ftyp: HEIC
+        raise CropToolError(STDIN_IMAGE_MESSAGE)
+    paths = []
+    for line in data.decode("utf-8", "surrogateescape").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("file://"):
+            line = unquote(urlparse(line).path)
+        paths.append(Path(line))
+    return paths
+
+
+def _default_stdin():
+    """sys.stdin als Byte-Stream, aber nur wenn etwas hineingeleitet wird (kein Terminal)."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        return sys.stdin.buffer
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
 def notify(message: str, title: str = "croptool") -> None:
     """macOS-Mitteilung anzeigen (nützlich beim Start über Kurzbefehle)."""
     if platform.system() != "Darwin":
@@ -185,8 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Ausgabe immer als PNG."
         ),
     )
-    parser.add_argument("inputs", nargs="+", type=Path, metavar="BILD",
-                        help="eine oder mehrere JPG/PNG-Dateien")
+    parser.add_argument("inputs", nargs="*", type=Path, metavar="BILD",
+                        help="eine oder mehrere JPG/PNG-Dateien "
+                             "(alternativ Pfade zeilenweise über stdin)")
     parser.add_argument("-s", "--size", type=parse_size,
                         default=(DEFAULT_WIDTH, DEFAULT_HEIGHT), metavar="BxH",
                         help=f"Zielgröße, Standard: {DEFAULT_WIDTH}x{DEFAULT_HEIGHT}")
@@ -202,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, stdin=None) -> int:
     args = build_parser().parse_args(argv)
     width, height = args.size
 
@@ -212,20 +310,32 @@ def main(argv: list[str] | None = None) -> int:
             notify(message, "croptool – Fehler")
         return 2
 
+    inputs = list(args.inputs)
+    if not inputs:
+        try:
+            inputs = inputs_from_stdin(stdin if stdin is not None else _default_stdin())
+        except CropToolError as exc:
+            return fail(str(exc))
+    if not inputs:
+        return fail(NO_INPUT_MESSAGE)
+
     if Image is None:
         return fail("Pillow ist nicht installiert. Bitte install.sh ausführen "
                     "(oder: python3 -m pip install Pillow).")
-    if args.output and len(args.inputs) != 1:
-        return fail("--output geht nur mit genau einem Eingabebild (sonst --output-dir).")
     if args.output and args.output_dir:
         return fail("--output und --output-dir bitte nicht gleichzeitig angeben.")
+
+    inputs = resolve_inputs(inputs)
+    if args.output and len(inputs) != 1:
+        return fail("--output geht nur mit genau einem Eingabebild (sonst --output-dir).")
 
     out_dir = args.output_dir.expanduser() if args.output_dir else None
     done: list[Path] = []
     errors: list[str] = []
+    missing = False
 
-    for src in args.inputs:
-        src = src.expanduser()
+    for src in inputs:
+        missing = missing or not src.is_file()
         if args.output:
             dst = args.output.expanduser()
             if dst.suffix.lower() != ".png":
@@ -238,6 +348,9 @@ def main(argv: list[str] | None = None) -> int:
         except CropToolError as exc:
             errors.append(str(exc))
             print(f"Fehler: {exc}", file=sys.stderr)
+
+    if missing:
+        print(QUOTE_HINT, file=sys.stderr)
 
     if args.notify:
         if errors:
